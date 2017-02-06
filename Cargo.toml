@@ -1,0 +1,9 @@
+[package]
+name = "parser"
+version = "0.1.0"
+authors = ["Julian Schrittwieser <j.schrittwieser@gmail.com>"]
+
+[dependencies]
+clap = "2"
+flate2 = "0.2.17"
+chrono = "0.3"
