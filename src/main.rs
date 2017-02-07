@@ -14,22 +14,25 @@ use std::time;
 
 use chrono::prelude::*;
 
+macro_rules! ret_check_eq {
+    ($a:expr, $b:expr) => { ret_check_impl!($a, $b, ==) }
+}
+
 macro_rules! ret_check_ge {
-    ($a:expr, $b:expr) => (
-      if !($a >= $b) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData,
-                   format!("ret_check_ge({}, {}) failed for {} >= {}",
-                    stringify!($a), stringify!($b), $a, $b)));
-      }
-    )
+    ($a:expr, $b:expr) => { ret_check_impl!($a, $b, >=) }
 }
 
 macro_rules! ret_check_le {
-    ($a:expr, $b:expr) => (
-      if !($a <= $b) {
+    ($a:expr, $b:expr) => { ret_check_impl!($a, $b, <=) }
+}
+
+macro_rules! ret_check_impl {
+    ($a:expr, $b:expr, $op:tt) => (
+      if !($a $op $b) {
         return Err(io::Error::new(io::ErrorKind::InvalidData,
-                   format!("ret_check_le({}, {}) failed for {} <= {}",
-                    stringify!($a), stringify!($b), $a, $b)));
+                   format!("check {} {} {}; failed for {} {} {}",
+                    stringify!($a), stringify!($op), stringify!($b),
+                     $a, stringify!($op), $b)));
       }
     )
 }
@@ -38,7 +41,10 @@ macro_rules! ret_check_le {
 enum WindMeasurement {
   Calm,
   Variable,
-  Normal{speed: num::rational::Ratio<i32>, direction: i32},
+  Normal {
+    speed: num::rational::Ratio<i32>,
+    direction: i32,
+  },
 }
 
 #[derive(Debug)]
@@ -52,10 +58,16 @@ struct WeatherMeasurement {
   air_pressure: Option<num::rational::Ratio<i32>>,
 }
 
-fn parse(filename: &str, reader: &mut BufRead) ->
-    Result<Vec<WeatherMeasurement>, io::Error> {
-  let parts = path::Path::new(filename).file_stem().unwrap().to_str().unwrap()
-                                       .split("-").collect::<Vec<_>>();
+fn parse(filename: &str,
+         reader: &mut BufRead)
+         -> Result<Vec<WeatherMeasurement>, io::Error> {
+  let parts = path::Path::new(filename)
+    .file_stem()
+    .unwrap()
+    .to_str()
+    .unwrap()
+    .split("-")
+    .collect::<Vec<_>>();
 
   let mut measurements = Vec::new();
   let mut missing = collections::HashMap::<&str, i32>::new();
@@ -68,16 +80,10 @@ fn parse(filename: &str, reader: &mut BufRead) ->
 
     // Some sanity checking.
     let usaf = &line[4..10];
-    if parts[0] != usaf {
-      return Err(io::Error::new(io::ErrorKind::InvalidData,
-        format!("unexpected usaf code: {} <> {}", parts[0], usaf)));
-    }
+    ret_check_eq!(parts[0], usaf);
 
     let wban = &line[10..15];
-    if parts[1] != wban {
-      return Err(io::Error::new(io::ErrorKind::InvalidData,
-        format!("unexpected wban code: {} <> {}", parts[1], wban)));
-    }
+    ret_check_eq!(parts[1], wban);
 
     // Date and time.
     let date = &line[15..23];
@@ -95,17 +101,12 @@ fn parse(filename: &str, reader: &mut BufRead) ->
 
     // Location.
     let latitude = line[28..34].parse::<i32>().unwrap();
-    if latitude < -90000 || latitude > 90000 {
-      return Err(io::Error::new(io::ErrorKind::InvalidData,
-                 format!("latitude out of range: {}", latitude)));
-    }
+    ret_check_ge!(latitude, -90000);
+    ret_check_le!(latitude, 90000);
 
     let longitude = line[34..41].parse::<i32>().unwrap();
-    if longitude < -180000 || longitude > 180000 {
-      return Err(io::Error::new(io::ErrorKind::InvalidData,
-                 format!("longitude out of range: {}", longitude)));
-    }
-
+    ret_check_ge!(longitude, -180000);
+    ret_check_le!(longitude, 180000);
 
     let elevation = line[46..51].parse::<i32>().unwrap();
     let maybe_elevation = if elevation >= -400 && elevation <= 9000 {
@@ -119,20 +120,21 @@ fn parse(filename: &str, reader: &mut BufRead) ->
     let wind_speed = line[65..69].parse::<i32>().unwrap();
     let wind_type = &line[64..65];
 
-    let wind_observation = if wind_direction >= 0 && wind_direction <= 360 &&
-       wind_speed >= 0 && wind_speed <= 900 {
-      Some(WindMeasurement::Normal{
-        speed: num::rational::Ratio::<i32>::new(wind_speed, 10),
-        direction: wind_direction
-      })
-    } else if wind_type == "C" || (wind_type == "9" && wind_speed == 0) {
-      Some(WindMeasurement::Calm)
-    } else if wind_type == "V" {
-      Some(WindMeasurement::Variable)
-    } else {
-      *missing.entry("wind").or_insert(0) += 1;
-      None
-    };
+    let wind_observation =
+      if wind_direction >= 0 && wind_direction <= 360 && wind_speed >= 0 &&
+         wind_speed <= 900 {
+        Some(WindMeasurement::Normal {
+          speed: num::rational::Ratio::<i32>::new(wind_speed, 10),
+          direction: wind_direction,
+        })
+      } else if wind_type == "C" || (wind_type == "9" && wind_speed == 0) {
+        Some(WindMeasurement::Calm)
+      } else if wind_type == "V" {
+        Some(WindMeasurement::Variable)
+      } else {
+        *missing.entry("wind").or_insert(0) += 1;
+        None
+      };
 
 
     let temp = line[87..92].parse::<i32>().unwrap();
@@ -152,7 +154,7 @@ fn parse(filename: &str, reader: &mut BufRead) ->
       None
     };
 
-    let measurement = WeatherMeasurement{
+    let measurement = WeatherMeasurement {
       datetime: datetime,
       latitude: num::rational::Ratio::<i32>::new(latitude, 1000),
       longitude: num::rational::Ratio::<i32>::new(longitude, 1000),
@@ -167,10 +169,9 @@ fn parse(filename: &str, reader: &mut BufRead) ->
 
   if !missing.is_empty() {
     for (key, count) in &missing {
-      let percent_missing = (*count as f32) / (measurements.len() as f32) * 100.0;
-      if percent_missing > 1.0 {
-        println!("missing {}: {} ({} %)", key, count,
-                percent_missing);
+      let missing_perc = (*count as f32) / (measurements.len() as f32) * 100.0;
+      if missing_perc > 1.0 {
+        println!("missing {}: {} ({} %)", key, count, missing_perc);
       }
     }
   }
@@ -178,22 +179,24 @@ fn parse(filename: &str, reader: &mut BufRead) ->
   return Ok(measurements);
 }
 
-fn parse_file(filename: &str) ->
-    Result<Vec<WeatherMeasurement>, io::Error> {
-  // println!("parsing {:?}", filename);
-
+fn parse_file(filename: &str) -> Result<Vec<WeatherMeasurement>, io::Error> {
   let f = fs::File::open(filename).unwrap();
   let mut reader = io::BufReader::new(f);
 
   match if filename.ends_with(".gz") {
-    parse(filename, &mut io::BufReader::new(
-      flate2::bufread::GzDecoder::new(reader).unwrap()))
+    parse(filename,
+          &mut io::BufReader::new(flate2::bufread::GzDecoder::new(reader)
+            .unwrap()))
   } else {
     parse(filename, &mut reader)
   } {
     Ok(measurements) => Ok(measurements),
-    Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData,
-                             format!("parsing {} failed: {}", filename, error))),
+    Err(error) => {
+      return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                format!("parsing {} failed: {}",
+                                        filename,
+                                        error)))
+    }
   }
 }
 
@@ -201,8 +204,10 @@ fn main() {
   let args = clap::App::new("parser")
     .arg(clap::Arg::with_name("file").long("file").takes_value(true))
     .arg(clap::Arg::with_name("directory").long("directory").takes_value(true))
-    .arg(clap::Arg::with_name("threads").long("threads").takes_value(true)
-         .default_value("8"))
+    .arg(clap::Arg::with_name("threads")
+      .long("threads")
+      .takes_value(true)
+      .default_value("8"))
     .get_matches();
 
 
@@ -214,7 +219,7 @@ fn main() {
     let mut num_files = 0;
     for path in fs::read_dir(directory).unwrap() {
       let tx = tx.clone();
-      pool.execute(move|| {
+      pool.execute(move || {
         tx.send(parse_file(path.unwrap().path().to_str().unwrap())).unwrap();
       });
       num_files += 1;
@@ -228,11 +233,14 @@ fn main() {
           num_processed += 1;
           if num_processed % 100 == 0 {
             let elapsed = start.elapsed();
-            let elapsed_secs = elapsed.as_secs() as f64 + (elapsed.subsec_nanos() as f64 / 1.0e9);
+            let elapsed_secs = elapsed.as_secs() as f64 +
+                               (elapsed.subsec_nanos() as f64 / 1.0e9);
             println!("processed {} files in {} - {} files / second",
-              num_processed, elapsed_secs, num_processed as f64 / elapsed_secs);
+                     num_processed,
+                     elapsed_secs,
+                     num_processed as f64 / elapsed_secs);
           }
-        },
+        }
         Err(error) => {
           panic!("{}", error);
         }
