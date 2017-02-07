@@ -2,12 +2,15 @@ extern crate chrono;
 extern crate clap;
 extern crate flate2;
 extern crate num;
+extern crate threadpool;
 
 use std::collections;
 use std::path;
 use std::fs;
 use std::io;
 use std::io::BufRead;
+use std::sync;
+use std::time;
 
 use chrono::prelude::*;
 
@@ -164,16 +167,20 @@ fn parse(filename: &str, reader: &mut BufRead) ->
 
   if !missing.is_empty() {
     for (key, count) in &missing {
-      println!("missing {}: {} ({} %)", key, count,
-              (*count as f32) / (measurements.len() as f32));
+      let percent_missing = (*count as f32) / (measurements.len() as f32) * 100.0;
+      if percent_missing > 1.0 {
+        println!("missing {}: {} ({} %)", key, count,
+                percent_missing);
+      }
     }
   }
 
   return Ok(measurements);
 }
 
-fn parse_file(filename: &str) {
-  println!("parsing {:?}", filename);
+fn parse_file(filename: &str) ->
+    Result<Vec<WeatherMeasurement>, io::Error> {
+  // println!("parsing {:?}", filename);
 
   let f = fs::File::open(filename).unwrap();
   let mut reader = io::BufReader::new(f);
@@ -184,10 +191,9 @@ fn parse_file(filename: &str) {
   } else {
     parse(filename, &mut reader)
   } {
-    Ok(measurements) => {},
-    Err(error) => {
-      panic!("parsing {:?} failed: {}", filename, error);
-    }
+    Ok(measurements) => Ok(measurements),
+    Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData,
+                             format!("parsing {} failed: {}", filename, error))),
   }
 }
 
@@ -195,11 +201,42 @@ fn main() {
   let args = clap::App::new("parser")
     .arg(clap::Arg::with_name("file").long("file").takes_value(true))
     .arg(clap::Arg::with_name("directory").long("directory").takes_value(true))
+    .arg(clap::Arg::with_name("threads").long("threads").takes_value(true)
+         .default_value("8"))
     .get_matches();
 
+
   args.value_of("directory").map(|directory| {
+    let n_threads = args.value_of("threads").unwrap().parse::<usize>().unwrap();
+    let pool = threadpool::ThreadPool::new(n_threads);
+    let (tx, rx) = sync::mpsc::channel();
+
+    let mut num_files = 0;
     for path in fs::read_dir(directory).unwrap() {
-      parse_file(path.unwrap().path().to_str().unwrap());
+      let tx = tx.clone();
+      pool.execute(move|| {
+        tx.send(parse_file(path.unwrap().path().to_str().unwrap())).unwrap();
+      });
+      num_files += 1;
+    }
+
+    let start = time::Instant::now();
+    let mut num_processed = 0;
+    for result in rx.iter().take(num_files) {
+      match result {
+        Ok(measurements) => {
+          num_processed += 1;
+          if num_processed % 100 == 0 {
+            let elapsed = start.elapsed();
+            let elapsed_secs = elapsed.as_secs() as f64 + (elapsed.subsec_nanos() as f64 / 1.0e9);
+            println!("processed {} files in {} - {} files / second",
+              num_processed, elapsed_secs, num_processed as f64 / elapsed_secs);
+          }
+        },
+        Err(error) => {
+          panic!("{}", error);
+        }
+      }
     }
   });
 
