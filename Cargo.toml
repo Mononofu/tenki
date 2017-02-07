@@ -7,3 +7,4 @@ authors = ["Julian Schrittwieser <j.schrittwieser@gmail.com>"]
 clap = "2"
 flate2 = "0.2.17"
 chrono = "0.3"
+num = "0.1"
