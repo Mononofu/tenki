@@ -1,7 +1,7 @@
 extern crate chrono;
 extern crate clap;
 extern crate flate2;
-extern crate num;
+extern crate image;
 extern crate threadpool;
 
 use std::collections;
@@ -37,30 +37,74 @@ macro_rules! ret_check_impl {
     )
 }
 
+macro_rules! check_eq {
+    ($a:expr, $b:expr) => { check_impl!($a, $b, ==) }
+}
+
+macro_rules! check_ge {
+    ($a:expr, $b:expr) => { check_impl!($a, $b, >=) }
+}
+
+macro_rules! check_le {
+    ($a:expr, $b:expr) => { check_impl!($a, $b, <=) }
+}
+
+macro_rules! check_lt {
+    ($a:expr, $b:expr) => { check_impl!($a, $b, <) }
+}
+
+macro_rules! check_impl {
+    ($a:expr, $b:expr, $op:tt) => (
+      if !($a $op $b) {
+        panic!("check {} {} {}; failed for {} {} {}",
+               stringify!($a), stringify!($op), stringify!($b),
+               $a, stringify!($op), $b);
+      }
+    )
+}
+
+macro_rules! ret_check_approx_eq {
+    ($a:expr, $b:expr, $t:expr) => (
+      if ($a - $b).abs() > $t {
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+                   format!("check {} ~ {}; failed for {} ~ {} (difference: {})",
+                    stringify!($a), stringify!($b),
+                     $a, $b, ($a - $b).abs())));
+      }
+    )
+}
+
 #[derive(Debug)]
 enum WindMeasurement {
   Calm,
   Variable,
-  Normal {
-    speed: num::rational::Ratio<i32>,
-    direction: i32,
-  },
+  Normal { speed: f32, direction: i32 },
 }
 
 #[derive(Debug)]
 struct WeatherMeasurement {
   datetime: DateTime<UTC>,
-  latitude: num::rational::Ratio<i32>,
-  longitude: num::rational::Ratio<i32>,
-  elevation: Option<i32>,
+
   wind: Option<WindMeasurement>,
-  air_temperature: Option<num::rational::Ratio<i32>>,
-  air_pressure: Option<num::rational::Ratio<i32>>,
+  air_temperature: Option<f32>,
+  air_pressure: Option<f32>,
+}
+
+struct WeatherStation {
+  usaf: String,
+  wban: String,
+
+  latitude: f32,
+  longitude: f32,
+  elevation: Option<i32>,
+
+  measurements: Vec<WeatherMeasurement>,
 }
 
 fn parse(filename: &str,
-         reader: &mut BufRead)
-         -> Result<Vec<WeatherMeasurement>, io::Error> {
+         reader: &mut BufRead,
+         max_measurements: usize)
+         -> Result<WeatherStation, io::Error> {
   let parts = path::Path::new(filename)
     .file_stem()
     .unwrap()
@@ -69,7 +113,17 @@ fn parse(filename: &str,
     .split("-")
     .collect::<Vec<_>>();
 
-  let mut measurements = Vec::new();
+  let mut station = WeatherStation {
+    usaf: String::from(parts[0]),
+    wban: String::from(parts[1]),
+
+    latitude: -1000.0,
+    longitude: -1000.0,
+    elevation: None,
+
+    measurements: vec![],
+  };
+
   let mut missing = collections::HashMap::<&str, i32>::new();
   for maybe_line in reader.lines() {
     let line = maybe_line.unwrap();
@@ -80,10 +134,10 @@ fn parse(filename: &str,
 
     // Some sanity checking.
     let usaf = &line[4..10];
-    ret_check_eq!(parts[0], usaf);
+    ret_check_eq!(station.usaf, usaf);
 
     let wban = &line[10..15];
-    ret_check_eq!(parts[1], wban);
+    ret_check_eq!(station.wban, wban);
 
     // Date and time.
     let date = &line[15..23];
@@ -100,21 +154,28 @@ fn parse(filename: &str,
     let datetime = utc_day.and_hms(hour, minute, 0);
 
     // Location.
-    let latitude = line[28..34].parse::<i32>().unwrap();
-    ret_check_ge!(latitude, -90000);
-    ret_check_le!(latitude, 90000);
+    let latitude = line[28..34].parse::<f32>().unwrap() / 1000.0;
+    ret_check_ge!(latitude, -90.0);
+    ret_check_le!(latitude, 90.0);
+    if station.measurements.is_empty() {
+      station.latitude = latitude;
+    }
 
-    let longitude = line[34..41].parse::<i32>().unwrap();
-    ret_check_ge!(longitude, -180000);
-    ret_check_le!(longitude, 180000);
+    let longitude = line[34..41].parse::<f32>().unwrap() / 1000.0;
+    ret_check_ge!(longitude, -180.0);
+    ret_check_le!(longitude, 180.0);
+    if station.measurements.is_empty() {
+      station.longitude = longitude;
+    }
 
     let elevation = line[46..51].parse::<i32>().unwrap();
-    let maybe_elevation = if elevation >= -400 && elevation <= 9000 {
-      Some(elevation)
+    if elevation >= -400 && elevation <= 9000 {
+      if station.elevation.is_none() {
+        station.elevation = Some(elevation);
+      }
     } else {
       *missing.entry("elevation").or_insert(0) += 1;
-      None
-    };
+    }
 
     let wind_direction = line[60..63].parse::<i32>().unwrap();
     let wind_speed = line[65..69].parse::<i32>().unwrap();
@@ -124,7 +185,7 @@ fn parse(filename: &str,
       if wind_direction >= 0 && wind_direction <= 360 && wind_speed >= 0 &&
          wind_speed <= 900 {
         Some(WindMeasurement::Normal {
-          speed: num::rational::Ratio::<i32>::new(wind_speed, 10),
+          speed: wind_speed as f32 / 10.0,
           direction: wind_direction,
         })
       } else if wind_type == "C" || (wind_type == "9" && wind_speed == 0) {
@@ -139,7 +200,7 @@ fn parse(filename: &str,
 
     let temp = line[87..92].parse::<i32>().unwrap();
     let maybe_air_temperature = if temp >= -1000 && temp <= 1000 {
-      Some(num::rational::Ratio::<i32>::new(temp, 10))
+      Some(temp as f32 / 10.0)
     } else {
       *missing.entry("air_temperature").or_insert(0) += 1;
       None
@@ -148,47 +209,51 @@ fn parse(filename: &str,
 
     let air_pressure = line[99..104].parse::<i32>().unwrap();
     let maybe_air_pressure = if air_pressure >= 0 && air_pressure <= 20000 {
-      Some(num::rational::Ratio::<i32>::new(air_pressure, 10))
+      Some(air_pressure as f32 / 10.0)
     } else {
       *missing.entry("air_pressure").or_insert(0) += 1;
       None
     };
 
-    let measurement = WeatherMeasurement {
+    station.measurements.push(WeatherMeasurement {
       datetime: datetime,
-      latitude: num::rational::Ratio::<i32>::new(latitude, 1000),
-      longitude: num::rational::Ratio::<i32>::new(longitude, 1000),
-      elevation: maybe_elevation,
       wind: wind_observation,
       air_temperature: maybe_air_temperature,
       air_pressure: maybe_air_pressure,
-    };
-    // println!("{:?}", measurement);
-    measurements.push(measurement);
-  }
+    });
 
-  if !missing.is_empty() {
-    for (key, count) in &missing {
-      let missing_perc = (*count as f32) / (measurements.len() as f32) * 100.0;
-      if missing_perc > 1.0 {
-        println!("missing {}: {} ({} %)", key, count, missing_perc);
-      }
+    if station.measurements.len() > max_measurements {
+      break;
     }
   }
 
-  return Ok(measurements);
+  // if !missing.is_empty() {
+  //   for (key, count) in &missing {
+  //     let missing_perc = (*count as f32) /
+  // (station.measurements.len() as f32) *
+  //                        100.0;
+  //     if missing_perc > 1.0 {
+  //       println!("missing {}: {} ({} %)", key, count, missing_perc);
+  //     }
+  //   }
+  // }
+
+  return Ok(station);
 }
 
-fn parse_file(filename: &str) -> Result<Vec<WeatherMeasurement>, io::Error> {
+fn parse_file(filename: &str,
+              max_measurements: usize)
+              -> Result<WeatherStation, io::Error> {
   let f = fs::File::open(filename).unwrap();
   let mut reader = io::BufReader::new(f);
 
   match if filename.ends_with(".gz") {
     parse(filename,
           &mut io::BufReader::new(flate2::bufread::GzDecoder::new(reader)
-            .unwrap()))
+            .unwrap()),
+          max_measurements)
   } else {
-    parse(filename, &mut reader)
+    parse(filename, &mut reader, max_measurements)
   } {
     Ok(measurements) => Ok(measurements),
     Err(error) => {
@@ -200,27 +265,63 @@ fn parse_file(filename: &str) -> Result<Vec<WeatherMeasurement>, io::Error> {
   }
 }
 
+fn draw_stations(stations: Vec<WeatherStation>) {
+  let width = 2048;
+  let height = 1024;
+  let mut img = image::ImageBuffer::new(width, height);
+
+  for station in stations {
+    let x = ((station.longitude + 180.0) / 360.0 * (width - 1) as f32) as u32;
+    check_lt!(x, width);
+
+    let y = ((station.latitude * -1.0 + 90.0) / 180.0 *
+             (height - 1) as f32) as u32;
+    check_lt!(y, height);
+
+
+    img.put_pixel(x, y, image::Rgb([255u8, 255u8, 0u8]));
+  }
+
+  let _ = img.save(&path::Path::new("weather.png"));
+}
+
 fn main() {
   let args = clap::App::new("parser")
     .arg(clap::Arg::with_name("file").long("file").takes_value(true))
     .arg(clap::Arg::with_name("directory").long("directory").takes_value(true))
+    .arg(clap::Arg::with_name("max_stations")
+      .long("max_stations")
+      .takes_value(true))
+    .arg(clap::Arg::with_name("max_measurements")
+      .long("max_measurements")
+      .takes_value(true))
     .arg(clap::Arg::with_name("threads")
       .long("threads")
       .takes_value(true)
       .default_value("8"))
     .get_matches();
 
+  let max_measurements = args.value_of("max_measurements")
+    .and_then(|n| n.parse::<usize>().ok())
+    .unwrap_or(usize::max_value());
+
+  let mut stations = Vec::new();
 
   args.value_of("directory").map(|directory| {
+    let max_stations = args.value_of("max_stations")
+      .and_then(|n| n.parse::<usize>().ok())
+      .unwrap_or(usize::max_value());
     let n_threads = args.value_of("threads").unwrap().parse::<usize>().unwrap();
     let pool = threadpool::ThreadPool::new(n_threads);
     let (tx, rx) = sync::mpsc::channel();
 
     let mut num_files = 0;
-    for path in fs::read_dir(directory).unwrap() {
+    for path in fs::read_dir(directory).unwrap().take(max_stations) {
       let tx = tx.clone();
       pool.execute(move || {
-        tx.send(parse_file(path.unwrap().path().to_str().unwrap())).unwrap();
+        tx.send(parse_file(path.unwrap().path().to_str().unwrap(),
+                           max_measurements))
+          .unwrap();
       });
       num_files += 1;
     }
@@ -229,7 +330,9 @@ fn main() {
     let mut num_processed = 0;
     for result in rx.iter().take(num_files) {
       match result {
-        Ok(measurements) => {
+        Ok(station) => {
+          stations.push(station);
+
           num_processed += 1;
           if num_processed % 100 == 0 {
             let elapsed = start.elapsed();
@@ -242,11 +345,15 @@ fn main() {
           }
         }
         Err(error) => {
-          panic!("{}", error);
+          println!("{}", error);
         }
       }
     }
   });
 
-  args.value_of("file").map(parse_file);
+  args.value_of("file")
+    .map(|f| parse_file(f, max_measurements))
+    .map(|result| { stations.push(result.unwrap()); });
+
+  draw_stations(stations);
 }
