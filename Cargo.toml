@@ -5,7 +5,11 @@ authors = ["Julian Schrittwieser <j.schrittwieser@gmail.com>"]
 
 [dependencies]
 clap = "2"
-flate2 = "0.2.17"
+flate2 = { version = "0.2", features = ["zlib"], default-features = false }
 chrono = "0.3"
 threadpool = "1.0"
 image = "*"
+cpuprofiler = "0.0.3"
+
+[profile.dev]
+codegen-units = 4

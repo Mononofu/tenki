@@ -1,5 +1,6 @@
 extern crate chrono;
 extern crate clap;
+extern crate cpuprofiler;
 extern crate flate2;
 extern crate image;
 extern crate threadpool;
@@ -307,6 +308,8 @@ fn main() {
 
   let mut stations = Vec::new();
 
+  cpuprofiler::PROFILER.lock().unwrap().start("prof.profile").unwrap();
+
   args.value_of("directory").map(|directory| {
     let max_stations = args.value_of("max_stations")
       .and_then(|n| n.parse::<usize>().ok())
@@ -354,6 +357,8 @@ fn main() {
   args.value_of("file")
     .map(|f| parse_file(f, max_measurements))
     .map(|result| { stations.push(result.unwrap()); });
+
+  cpuprofiler::PROFILER.lock().unwrap().stop().unwrap();
 
   draw_stations(stations);
 }
