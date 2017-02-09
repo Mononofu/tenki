@@ -267,8 +267,8 @@ fn parse_file(filename: &str,
 }
 
 fn draw_stations(stations: Vec<WeatherStation>) {
-  let width = 2048;
-  let height = 1024;
+  let width = 1024;
+  let height = 512;
   let mut img = image::ImageBuffer::new(width, height);
 
   for station in stations {
@@ -279,8 +279,27 @@ fn draw_stations(stations: Vec<WeatherStation>) {
              (height - 1) as f32) as u32;
     check_lt!(y, height);
 
+    let pixel = if station.measurements.is_empty() {
+      image::Rgb([255u8, 255u8, 0u8])
+    } else {
+      match station.measurements
+        .iter()
+        .filter(|m| m.air_temperature.is_some())
+        .next() {
+        Some(m) => {
+          let t = m.air_temperature.unwrap();
+          let t_min = -30.0f32;
+          let t_max = 40.0f32;
+          let scaled = (t_max.min(t_min.max(t)) - t_min) / (t_max - t_min);
+          image::Rgb([(255.0 * scaled) as u8,
+                      127u8,
+                      (255.0 * (1.0 - scaled)) as u8])
+        }
+        None => image::Rgb([255u8, 0u8, 0u8]),
+      }
+    };
 
-    img.put_pixel(x, y, image::Rgb([255u8, 255u8, 0u8]));
+    img.put_pixel(x, y, pixel);
   }
 
   let _ = img.save(&path::Path::new("weather.png"));
