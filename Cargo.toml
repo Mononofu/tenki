@@ -10,6 +10,7 @@ chrono = "0.3"
 threadpool = "1.0"
 image = "*"
 cpuprofiler = "0.0.3"
+time = "0.1"
 
 [profile.dev]
 codegen-units = 4

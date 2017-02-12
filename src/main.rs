@@ -4,6 +4,7 @@ extern crate cpuprofiler;
 extern crate flate2;
 extern crate image;
 extern crate threadpool;
+extern crate time;
 
 use std::collections;
 use std::path;
@@ -11,7 +12,6 @@ use std::fs;
 use std::io;
 use std::io::BufRead;
 use std::sync;
-use std::time;
 
 use chrono::prelude::*;
 
@@ -216,6 +216,11 @@ fn parse(filename: &str,
       None
     };
 
+    if wind_observation.is_none() && maybe_air_temperature.is_none() &&
+       maybe_air_pressure.is_none() {
+      continue;
+    }
+
     station.measurements.push(WeatherMeasurement {
       datetime: datetime,
       wind: wind_observation,
@@ -266,7 +271,10 @@ fn parse_file(filename: &str,
   }
 }
 
-fn draw_stations(stations: Vec<WeatherStation>) {
+fn draw_stations(stations: &Vec<WeatherStation>,
+                 start_time: DateTime<UTC>,
+                 end_time: DateTime<UTC>,
+                 image_path: &path::Path) {
   let width = 1024;
   let height = 512;
   let mut img = image::ImageBuffer::new(width, height);
@@ -280,10 +288,23 @@ fn draw_stations(stations: Vec<WeatherStation>) {
     check_lt!(y, height);
 
     let pixel = if station.measurements.is_empty() {
-      image::Rgb([255u8, 255u8, 0u8])
+      image::Rgb([0u8, 0u8, 0u8])
     } else {
-      match station.measurements
-        .iter()
+      let start = match station.measurements
+        .binary_search_by(|m| m.datetime.cmp(&start_time)) {
+        Ok(index) => index,
+        Err(index) => index,
+      };
+      let (_, after) = station.measurements.split_at(start);
+
+      let end = match after.binary_search_by(|m| m.datetime.cmp(&end_time)) {
+        Ok(index) => index,
+        Err(index) => index,
+      };
+      let (measurements, _) = after.split_at(end);
+
+
+      match measurements.iter()
         .filter(|m| m.air_temperature.is_some())
         .next() {
         Some(m) => {
@@ -295,20 +316,23 @@ fn draw_stations(stations: Vec<WeatherStation>) {
                       127u8,
                       (255.0 * (1.0 - scaled)) as u8])
         }
-        None => image::Rgb([255u8, 0u8, 0u8]),
+        None => image::Rgb([0u8, 0u8, 0u8]),
       }
     };
 
     img.put_pixel(x, y, pixel);
   }
 
-  let _ = img.save(&path::Path::new("weather.png"));
+  let _ = img.save(image_path);
 }
 
 fn main() {
   let args = clap::App::new("parser")
     .arg(clap::Arg::with_name("file").long("file").takes_value(true))
     .arg(clap::Arg::with_name("directory").long("directory").takes_value(true))
+    .arg(clap::Arg::with_name("render_dir")
+      .long("render_dir")
+      .takes_value(true))
     .arg(clap::Arg::with_name("max_stations")
       .long("max_stations")
       .takes_value(true))
@@ -348,7 +372,8 @@ fn main() {
       num_files += 1;
     }
 
-    let start = time::Instant::now();
+    let start = time::now();
+    let mut last_update = time::now();
     let mut num_processed = 0;
     for result in rx.iter().take(num_files) {
       match result {
@@ -356,10 +381,10 @@ fn main() {
           stations.push(station);
 
           num_processed += 1;
-          if num_processed % 100 == 0 {
-            let elapsed = start.elapsed();
-            let elapsed_secs = elapsed.as_secs() as f64 +
-                               (elapsed.subsec_nanos() as f64 / 1.0e9);
+          if time::now() - last_update > time::Duration::seconds(1) {
+            last_update = time::now();
+            let elapsed = time::now() - start;
+            let elapsed_secs = elapsed.num_milliseconds() as f64 / 1.0e3;
             println!("processed {} files in {} - {} files / second",
                      num_processed,
                      elapsed_secs,
@@ -379,5 +404,14 @@ fn main() {
 
   cpuprofiler::PROFILER.lock().unwrap().stop().unwrap();
 
-  draw_stations(stations);
+  args.value_of("render_dir").map(|directory| {
+    let start = UTC.ymd(2016, 1, 1).and_hms(0, 0, 0);
+    for i in 0..(52) {
+      draw_stations(&stations,
+                    start + time::Duration::weeks(i),
+                    start + time::Duration::weeks(i + 1),
+                    &path::Path::new(directory)
+                      .join(format!("weather-{:04}.png", i)));
+    }
+  });
 }
