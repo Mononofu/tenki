@@ -1,8 +1,13 @@
+#![feature(plugin)]
+#![plugin(rocket_codegen)]
+
 extern crate chrono;
 extern crate clap;
 extern crate cpuprofiler;
 extern crate flate2;
 extern crate image;
+extern crate rocket;
+extern crate rocket_contrib;
 extern crate threadpool;
 extern crate time;
 
@@ -326,6 +331,19 @@ fn draw_stations(stations: &Vec<WeatherStation>,
   let _ = img.save(image_path);
 }
 
+#[get("/")]
+fn index() -> rocket_contrib::Template {
+  let context = collections::HashMap::<&str, &str>::new();
+  rocket_contrib::Template::render("index", &context)
+}
+
+#[get("/static/<filename>")]
+fn static_file(filename: &str)
+               -> Result<rocket::response::NamedFile, io::Error> {
+  return rocket::response::NamedFile::open(path::Path::new("static")
+    .join(filename));
+}
+
 fn main() {
   let args = clap::App::new("parser")
     .arg(clap::Arg::with_name("file").long("file").takes_value(true))
@@ -344,6 +362,8 @@ fn main() {
       .takes_value(true)
       .default_value("8"))
     .get_matches();
+
+  rocket::ignite().mount("/", routes![index, static_file]).launch();
 
   let max_measurements = args.value_of("max_measurements")
     .and_then(|n| n.parse::<usize>().ok())

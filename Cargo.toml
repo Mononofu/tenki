@@ -11,6 +11,13 @@ threadpool = "1.0"
 image = "*"
 cpuprofiler = "0.0.3"
 time = "0.1"
+rocket = "0.2.0"
+rocket_codegen = "0.2.0"
 
 [profile.dev]
 codegen-units = 4
+
+[dependencies.rocket_contrib]
+version = "*"
+default-features = false
+features = ["tera_templates"]
