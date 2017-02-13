@@ -11,7 +11,19 @@
 
     <title>Starter Template for Bootstrap</title>
 
-    <link href="static/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/leaflet.css" rel="stylesheet" />
+    <script src="/static/leaflet.js"></script>
+
+    <style type="text/css">
+    #map { height: 600px; }
+    path {
+      stroke-width: 1px;
+      stroke: grey;
+      stroke-opacity: 0.3;
+    }
+    </style>
+
 
   </head>
 
@@ -40,12 +52,28 @@
 
     <div class="container">
 
-      <div class="starter-template">
-        <h1>Bootstrap starter template 2</h1>
-        <p class="lead">Use this document as a way to quickly start any new project.<br> All you get is this text and a mostly barebones HTML document.</p>
+      <div class="row">
+        <div class="col-md-12">
+           <div id="map"></div>
+        </div>
       </div>
 
     </div><!-- /.container -->
+
+  <script type="text/javascript">
+var map = L.map('map').setView([51.505, -0.09], 3);
+L.tileLayer('/api/map/{z}/{x}/{y}/tile.png', {maxZoom: 18, minZoom: 0}).addTo(map);
+var countryLayer = L.geoJSON().addTo(map);
+
+var xhr = new XMLHttpRequest();
+xhr.onreadystatechange = function() {
+    if (xhr.readyState == XMLHttpRequest.DONE) {
+        countryLayer.addData(JSON.parse(xhr.responseText));
+    }
+}
+xhr.open('GET', '/static/countries.geo.json', true);
+xhr.send(null);
+  </script>
 
   </body>
 </html>

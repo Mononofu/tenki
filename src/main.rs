@@ -20,6 +20,8 @@ use std::sync;
 
 use chrono::prelude::*;
 
+use std::f64::consts;
+
 macro_rules! ret_check_eq {
     ($a:expr, $b:expr) => { ret_check_impl!($a, $b, ==) }
 }
@@ -276,21 +278,50 @@ fn parse_file(filename: &str,
   }
 }
 
+// Applies the web-mercator projection to a latitude in degrees.
+// Following https://en.wikipedia.org/wiki/Web_Mercator#Formulas
+fn mercator(latitude: f32) -> f32 {
+  ((consts::PI as f32 / 4.0) + (latitude.to_radians() / 2.0)).tan().ln()
+}
+
 fn draw_stations(stations: &Vec<WeatherStation>,
+                 longitude_min: f32,
+                 longitude_max: f32,
+                 latitude_min: f32,
+                 latitude_max: f32,
+                 width: u32,
+                 height: u32,
+                 dot_radius: u32,
                  start_time: DateTime<UTC>,
-                 end_time: DateTime<UTC>,
-                 image_path: &path::Path) {
-  let width = 1024;
-  let height = 512;
+                 end_time: DateTime<UTC>)
+                 -> image::RgbImage {
+  println!("requesting stations for longitude {} to {}, latitude {} to {}",
+           longitude_min,
+           longitude_max,
+           latitude_min,
+           latitude_max);
+
   let mut img = image::ImageBuffer::new(width, height);
 
   for station in stations {
-    let x = ((station.longitude + 180.0) / 360.0 * (width - 1) as f32) as u32;
-    check_lt!(x, width);
+    if station.longitude < longitude_min || station.longitude > longitude_max ||
+       station.latitude < latitude_min ||
+       station.latitude > latitude_max {
+      continue;
+    }
 
-    let y = ((station.latitude * -1.0 + 90.0) / 180.0 *
-             (height - 1) as f32) as u32;
-    check_lt!(y, height);
+    let x = ((station.longitude - longitude_min) /
+             (longitude_max - longitude_min) *
+             (width - 1) as f32) as i32;
+    check_ge!(x, 0);
+    check_lt!(x, width as i32);
+
+    let y = ((1.0 -
+              (mercator(station.latitude) - mercator(latitude_min)) /
+              (mercator(latitude_max) - mercator(latitude_min))) *
+             (height - 1) as f32) as i32;
+    check_ge!(y, 0);
+    check_lt!(y, height as i32);
 
     let pixel = if station.measurements.is_empty() {
       image::Rgb([0u8, 0u8, 0u8])
@@ -325,10 +356,45 @@ fn draw_stations(stations: &Vec<WeatherStation>,
       }
     };
 
-    img.put_pixel(x, y, pixel);
+    for dx in 0..dot_radius {
+      for dy in 0..dot_radius {
+        let (px, py) = (x + (dx as i32 - dot_radius as i32 / 2),
+                        y + (dy as i32 - dot_radius as i32 / 2));
+        if px >= 0 && px < width as i32 && py >= 0 && py < height as i32 {
+          img.put_pixel(px as u32, py as u32, pixel);
+        }
+      }
+    }
   }
 
+  return img;
+}
+
+fn draw_stations_to_file(stations: &Vec<WeatherStation>,
+                         start_time: DateTime<UTC>,
+                         end_time: DateTime<UTC>,
+                         image_path: &path::Path) {
+  let img = draw_stations(stations,
+                          -180.0,
+                          180.0,
+                          -90.0,
+                          90.0,
+                          1024,
+                          512,
+                          1,
+                          start_time,
+                          end_time);
   let _ = img.save(image_path);
+}
+
+fn coordinates_to_degrees(zoom: u32, x: u32, y: u32) -> (f32, f32) {
+  let n = 2f32.powi(zoom as i32);
+  let longitude = (x as f32) / n * 360.0 - 180.0;
+  let latitude = (consts::PI as f32 * (1.0 - 2.0 * (y as f32) / n))
+    .sinh()
+    .atan()
+    .to_degrees();
+  (longitude, latitude)
 }
 
 #[get("/")]
@@ -340,8 +406,48 @@ fn index() -> rocket_contrib::Template {
 #[get("/static/<filename>")]
 fn static_file(filename: &str)
                -> Result<rocket::response::NamedFile, io::Error> {
-  return rocket::response::NamedFile::open(path::Path::new("static")
-    .join(filename));
+  rocket::response::NamedFile::open(path::Path::new("static").join(filename))
+}
+
+#[get("/api/map/<zoom>/<x>/<y>/tile.png")]
+fn map_tile<'a>(zoom: u32,
+                x: u32,
+                y: u32,
+                stations: rocket::State<Vec<WeatherStation>>)
+                -> Result<rocket::Response<'a>, io::Error> {
+  let (long_min, lat_top) = coordinates_to_degrees(zoom, x, y);
+  let (long_max, lat_bot) = coordinates_to_degrees(zoom, x + 1, y + 1);
+
+  let dot_radius = if zoom < 5 { 1 } else { zoom - 3 };
+
+  let size = 256;
+  let mut img = draw_stations(stations.inner(),
+                              long_min,
+                              long_max,
+                              lat_bot,
+                              lat_top,
+                              size,
+                              size,
+                              dot_radius,
+                              UTC.ymd(1900, 1, 1).and_hms(0, 0, 0),
+                              UTC.ymd(2100, 1, 1).and_hms(0, 0, 0));
+
+  // Debug borders:
+  // for i in 0..size {
+  //   img.put_pixel(i, 0, image::Rgb([0u8, 255u8, 0u8]));
+  //   img.put_pixel(i, size - 1, image::Rgb([0u8, 255u8, 0u8]));
+  //   img.put_pixel(0, i, image::Rgb([0u8, 255u8, 0u8]));
+  //   img.put_pixel(size - 1, i, image::Rgb([0u8, 255u8, 0u8]));
+  // }
+  // img.put_pixel(size / 2, size / 2, image::Rgb([255u8, 0u8, 0u8]));
+
+  let mut buf = Vec::<u8>::new();
+  {
+    let encoder = image::png::PNGEncoder::new(&mut buf);
+    try!(encoder.encode(&img.into_raw(), size, size, image::ColorType::RGB(8)));
+  }
+
+  rocket::Response::build().sized_body(io::Cursor::new(buf)).ok()
 }
 
 fn main() {
@@ -362,8 +468,6 @@ fn main() {
       .takes_value(true)
       .default_value("8"))
     .get_matches();
-
-  rocket::ignite().mount("/", routes![index, static_file]).launch();
 
   let max_measurements = args.value_of("max_measurements")
     .and_then(|n| n.parse::<usize>().ok())
@@ -427,11 +531,17 @@ fn main() {
   args.value_of("render_dir").map(|directory| {
     let start = UTC.ymd(2016, 1, 1).and_hms(0, 0, 0);
     for i in 0..(52) {
-      draw_stations(&stations,
-                    start + time::Duration::weeks(i),
-                    start + time::Duration::weeks(i + 1),
-                    &path::Path::new(directory)
-                      .join(format!("weather-{:04}.png", i)));
+      draw_stations_to_file(&stations,
+                            start + time::Duration::weeks(i),
+                            start + time::Duration::weeks(i + 1),
+                            &path::Path::new(directory)
+                              .join(format!("weather-{:04}.png", i)));
     }
   });
+
+
+  rocket::ignite()
+    .mount("/", routes![index, static_file, map_tile])
+    .manage(stations)
+    .launch();
 }
